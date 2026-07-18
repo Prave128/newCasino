@@ -16,6 +16,13 @@ warnings.filterwarnings("ignore")
 
 # ============ FLASK WEB SERVER FOR RENDER ============
 web_app = Flask(__name__)
+@web_app.route('/download-db')
+def download_db():
+    from flask import send_file
+    import os
+    if os.path.exists('masterdice.db'):
+        return send_file('masterdice.db', as_attachment=True)
+    return "Database not found", 404
 
 @web_app.route('/')
 def home():
