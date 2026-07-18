@@ -1,3 +1,5 @@
+import psycopg2
+import os
 import logging
 import sqlite3
 import random
