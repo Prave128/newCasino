@@ -6,11 +6,29 @@ import re
 import asyncio
 import os
 import shutil
+import threading
 from datetime import datetime, timedelta
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import warnings
 warnings.filterwarnings("ignore")
+
+# ============ FLASK WEB SERVER FOR RENDER ============
+web_app = Flask('')
+
+@web_app.route('/')
+def home():
+    return "Bot is running! 🚀"
+
+@web_app.route('/health')
+def health():
+    return "OK", 200
+
+def run_web():
+    web_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+# ============ END FLASK WEB SERVER ============
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -18,8 +36,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "8819667974:AAFfXGJ3Pnb8Bh9HqV7gtO3vRM5Jd6cr1yM"
-BOT_USERNAME = "MasterDiceBot"
+BOT_TOKEN = "8895716035:AAFb4bRC-cwgb6IICsxE8ZWnSXMzK_4Qw_c"
+BOT_USERNAME = "Casino_blazer_bot"
 ADMIN_USER_ID = 5943318266
 ADMIN_USERNAME = "@XTOP_879"
 BRAND_NAME = "🎰 CASINO BLAZE"
@@ -2343,4 +2361,9 @@ def main():
     )
 
 if __name__ == '__main__':
+    # Start Flask web server in background for Render
+    web_thread = threading.Thread(target=run_web, daemon=True)
+    web_thread.start()
+    
+    # Start the bot
     main()
