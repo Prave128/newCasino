@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ============ FLASK WEB SERVER FOR RENDER ============
-web_app = Flask('')
+web_app = Flask(__name__)
 
 @web_app.route('/')
 def home():
@@ -27,6 +27,8 @@ def health():
 
 def run_web():
     web_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+# ============ REST OF YOUR BOT CODE ============
 
 # ============ END FLASK WEB SERVER ============
 
