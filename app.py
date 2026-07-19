@@ -6,11 +6,10 @@ import random
 import string
 import re
 import asyncio
-import os
 import shutil
 import threading
 from datetime import datetime, timedelta
-from flask import Flask
+from flask import Flask, send_file
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import warnings
@@ -18,10 +17,9 @@ warnings.filterwarnings("ignore")
 
 # ============ FLASK WEB SERVER FOR RENDER ============
 web_app = Flask(__name__)
+
 @web_app.route('/download-db')
 def download_db():
-    from flask import send_file
-    import os
     if os.path.exists('masterdice.db'):
         return send_file('masterdice.db', as_attachment=True)
     return "Database not found", 404
@@ -36,8 +34,6 @@ def health():
 
 def run_web():
     web_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-# ============ REST OF YOUR BOT CODE ============
 
 # ============ END FLASK WEB SERVER ============
 
@@ -105,11 +101,14 @@ def get_game_name(game_type):
     }
     return names.get(game_type, 'Game')
 
-# ============ DATABASE ============
+# ============ DATABASE (SUPABASE POSTGRESQL) ============
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Get connection to Supabase PostgreSQL database"""
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable not set!")
+    conn = psycopg2.connect(database_url, connect_timeout=10)
     return conn
 
 def backup_database():
@@ -131,17 +130,18 @@ def backup_database():
         return False
 
 def init_db():
+    """Create tables in Supabase PostgreSQL"""
     conn = get_db()
     c = conn.cursor()
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             username TEXT,
             first_name TEXT,
             last_name TEXT,
             currency TEXT DEFAULT 'INR',
-            balance INTEGER DEFAULT 0,
+            balance BIGINT DEFAULT 0,
             upi_address TEXT,
             total_games INTEGER DEFAULT 0,
             total_wins INTEGER DEFAULT 0,
@@ -149,20 +149,20 @@ def init_db():
             referral_code TEXT,
             daily_bonus_claimed TIMESTAMP,
             daily_bonus_streak INTEGER DEFAULT 0,
-            total_deposited INTEGER DEFAULT 0,
-            total_withdrawn INTEGER DEFAULT 0,
+            total_deposited BIGINT DEFAULT 0,
+            total_withdrawn BIGINT DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             type TEXT,
-            amount INTEGER,
+            amount BIGINT,
             currency TEXT,
-            balance_after INTEGER,
+            balance_after BIGINT,
             description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -170,13 +170,13 @@ def init_db():
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS game_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             game_type TEXT,
-            bet_amount INTEGER,
+            bet_amount BIGINT,
             currency TEXT,
             result TEXT,
-            won_amount INTEGER,
+            won_amount BIGINT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -184,9 +184,9 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS challenges (
             challenge_id TEXT PRIMARY KEY,
-            challenger_id INTEGER,
-            challenged_id INTEGER,
-            bet_amount INTEGER,
+            challenger_id BIGINT,
+            challenged_id BIGINT,
+            bet_amount BIGINT,
             game_type TEXT,
             rolls INTEGER,
             win_condition TEXT,
@@ -201,13 +201,13 @@ def init_db():
         CREATE TABLE IF NOT EXISTS active_games (
             game_id TEXT PRIMARY KEY,
             challenge_id TEXT,
-            player1_id INTEGER,
-            player2_id INTEGER,
-            bet_amount INTEGER,
+            player1_id BIGINT,
+            player2_id BIGINT,
+            bet_amount BIGINT,
             game_type TEXT,
             rolls INTEGER,
             win_condition TEXT,
-            current_turn INTEGER,
+            current_turn BIGINT,
             player1_rolls TEXT,
             player2_rolls TEXT,
             player1_wins INTEGER DEFAULT 0,
@@ -220,10 +220,10 @@ def init_db():
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS bank_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             type TEXT,
-            amount INTEGER,
+            amount BIGINT,
             utr TEXT DEFAULT '',
             time_frame TEXT DEFAULT '',
             status TEXT DEFAULT 'pending',
@@ -233,11 +233,11 @@ def init_db():
     
     c.execute('''
         CREATE TABLE IF NOT EXISTS admin_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id INTEGER,
+            id SERIAL PRIMARY KEY,
+            admin_id BIGINT,
             action TEXT,
-            target_user INTEGER,
-            amount INTEGER,
+            target_user BIGINT,
+            amount BIGINT,
             description TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -245,7 +245,7 @@ def init_db():
     
     conn.commit()
     conn.close()
-    print("✅ Database initialized!")
+    print("✅ Supabase tables initialized successfully!")
     
     # Create initial backup
     backup_database()
@@ -253,14 +253,14 @@ def init_db():
 def get_or_create_user(user_id, username, first_name, last_name=None):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
     user = c.fetchone()
     
     if not user:
         referral_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
         c.execute('''
             INSERT INTO users (user_id, username, first_name, last_name, referral_code, balance)
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s)
         ''', (user_id, username or f"user_{user_id}", first_name or "User", last_name or "", referral_code, 0))
         conn.commit()
     
@@ -270,7 +270,7 @@ def get_or_create_user(user_id, username, first_name, last_name=None):
 def get_user_profile(user_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT * FROM users WHERE user_id = %s', (user_id,))
     user = c.fetchone()
     conn.close()
     
@@ -298,7 +298,7 @@ def get_user_profile(user_id):
 def update_wallet(user_id, amount):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+    c.execute('UPDATE users SET balance = balance + %s WHERE user_id = %s', (amount, user_id))
     conn.commit()
     conn.close()
     backup_database()
@@ -306,7 +306,7 @@ def update_wallet(user_id, amount):
 def get_balance(user_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    c.execute('SELECT balance FROM users WHERE user_id = %s', (user_id,))
     result = c.fetchone()
     conn.close()
     return result[0] if result else 0
@@ -314,7 +314,7 @@ def get_balance(user_id):
 def set_upi_address(user_id, upi_address):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE users SET upi_address = ? WHERE user_id = ?', (upi_address, user_id))
+    c.execute('UPDATE users SET upi_address = %s WHERE user_id = %s', (upi_address, user_id))
     conn.commit()
     conn.close()
 
@@ -323,7 +323,7 @@ def get_game_history(user_id, limit=20):
     c = conn.cursor()
     c.execute('''
         SELECT game_type, bet_amount, currency, result, won_amount, created_at 
-        FROM game_history WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+        FROM game_history WHERE user_id = %s ORDER BY created_at DESC LIMIT %s
     ''', (user_id, limit))
     games = c.fetchall()
     conn.close()
@@ -334,7 +334,7 @@ def save_game_history(user_id, game_type, bet_amount, currency, result, won_amou
     c = conn.cursor()
     c.execute('''
         INSERT INTO game_history (user_id, game_type, bet_amount, currency, result, won_amount)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
     ''', (user_id, game_type, bet_amount, currency, result, won_amount))
     conn.commit()
     conn.close()
@@ -344,11 +344,11 @@ def update_user_stats(user_id, result):
     conn = get_db()
     c = conn.cursor()
     if result == "win":
-        c.execute('UPDATE users SET total_games = total_games + 1, total_wins = total_wins + 1 WHERE user_id = ?', (user_id,))
+        c.execute('UPDATE users SET total_games = total_games + 1, total_wins = total_wins + 1 WHERE user_id = %s', (user_id,))
     elif result == "loss":
-        c.execute('UPDATE users SET total_games = total_games + 1, total_losses = total_losses + 1 WHERE user_id = ?', (user_id,))
+        c.execute('UPDATE users SET total_games = total_games + 1, total_losses = total_losses + 1 WHERE user_id = %s', (user_id,))
     else:
-        c.execute('UPDATE users SET total_games = total_games + 1 WHERE user_id = ?', (user_id,))
+        c.execute('UPDATE users SET total_games = total_games + 1 WHERE user_id = %s', (user_id,))
     conn.commit()
     conn.close()
     backup_database()
@@ -360,7 +360,7 @@ def create_challenge(challenger_id, challenged_id, bet_amount, game_type, rolls,
     c = conn.cursor()
     c.execute('''
         INSERT INTO challenges (challenge_id, challenger_id, challenged_id, bet_amount, game_type, rolls, win_condition, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending')
     ''', (challenge_id, challenger_id, challenged_id, bet_amount, game_type, rolls, win_condition))
     conn.commit()
     conn.close()
@@ -370,7 +370,7 @@ def create_challenge(challenger_id, challenged_id, bet_amount, game_type, rolls,
 def get_challenge(challenge_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT * FROM challenges WHERE challenge_id = ?', (challenge_id,))
+    c.execute('SELECT * FROM challenges WHERE challenge_id = %s', (challenge_id,))
     challenge = c.fetchone()
     conn.close()
     
@@ -393,14 +393,14 @@ def get_challenge(challenge_id):
 def update_challenge_status(challenge_id, status):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE challenges SET status = ? WHERE challenge_id = ?', (status, challenge_id))
+    c.execute('UPDATE challenges SET status = %s WHERE challenge_id = %s', (status, challenge_id))
     conn.commit()
     conn.close()
 
 def delete_challenge(challenge_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('DELETE FROM challenges WHERE challenge_id = ?', (challenge_id,))
+    c.execute('DELETE FROM challenges WHERE challenge_id = %s', (challenge_id,))
     conn.commit()
     conn.close()
 
@@ -413,7 +413,7 @@ def create_active_game(challenge_id, player1_id, player2_id, bet_amount, game_ty
         INSERT INTO active_games (
             game_id, challenge_id, player1_id, player2_id, bet_amount, game_type, 
             rolls, win_condition, current_turn, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'active')
     ''', (game_id, challenge_id, player1_id, player2_id, bet_amount, game_type, 
           rolls, win_condition, player1_id))
     conn.commit()
@@ -426,7 +426,7 @@ def get_user_active_game(user_id):
     c = conn.cursor()
     c.execute('''
         SELECT * FROM active_games 
-        WHERE (player1_id = ? OR player2_id = ?) AND status = 'active'
+        WHERE (player1_id = %s OR player2_id = %s) AND status = 'active'
     ''', (user_id, user_id))
     game = c.fetchone()
     conn.close()
@@ -465,8 +465,8 @@ def update_game_rolls(game_id, player1_rolls, player2_rolls):
     c = conn.cursor()
     c.execute('''
         UPDATE active_games SET 
-            player1_rolls = ?, player2_rolls = ?
-        WHERE game_id = ?
+            player1_rolls = %s, player2_rolls = %s
+        WHERE game_id = %s
     ''', (str(player1_rolls), str(player2_rolls), game_id))
     conn.commit()
     conn.close()
@@ -474,7 +474,7 @@ def update_game_rolls(game_id, player1_rolls, player2_rolls):
 def update_game_turn(game_id, current_turn):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE active_games SET current_turn = ? WHERE game_id = ?', (current_turn, game_id))
+    c.execute('UPDATE active_games SET current_turn = %s WHERE game_id = %s', (current_turn, game_id))
     conn.commit()
     conn.close()
 
@@ -483,8 +483,8 @@ def update_game_status_and_wins(game_id, status, player1_wins, player2_wins):
     c = conn.cursor()
     c.execute('''
         UPDATE active_games SET 
-            status = ?, player1_wins = ?, player2_wins = ?
-        WHERE game_id = ?
+            status = %s, player1_wins = %s, player2_wins = %s
+        WHERE game_id = %s
     ''', (status, player1_wins, player2_wins, game_id))
     conn.commit()
     conn.close()
@@ -492,22 +492,22 @@ def update_game_status_and_wins(game_id, status, player1_wins, player2_wins):
 def update_game_round(game_id, current_round):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE active_games SET current_round = ? WHERE game_id = ?', (current_round, game_id))
+    c.execute('UPDATE active_games SET current_round = %s WHERE game_id = %s', (current_round, game_id))
     conn.commit()
     conn.close()
 
 def delete_active_game(game_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('DELETE FROM active_games WHERE game_id = ?', (game_id,))
+    c.execute('DELETE FROM active_games WHERE game_id = %s', (game_id,))
     conn.commit()
     conn.close()
 
 def delete_user_games(user_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('DELETE FROM active_games WHERE player1_id = ? OR player2_id = ?', (user_id, user_id))
-    c.execute('DELETE FROM challenges WHERE challenger_id = ? OR challenged_id = ?', (user_id, user_id))
+    c.execute('DELETE FROM active_games WHERE player1_id = %s OR player2_id = %s', (user_id, user_id))
+    c.execute('DELETE FROM challenges WHERE challenger_id = %s OR challenged_id = %s', (user_id, user_id))
     conn.commit()
     conn.close()
 
@@ -516,17 +516,18 @@ def add_bank_request(user_id, req_type, amount, utr='', time_frame=''):
     c = conn.cursor()
     c.execute('''
         INSERT INTO bank_requests (user_id, type, amount, utr, time_frame, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
+        VALUES (%s, %s, %s, %s, %s, 'pending')
     ''', (user_id, req_type, amount, utr, time_frame))
     conn.commit()
-    request_id = c.lastrowid
+    c.execute('SELECT lastval()')
+    request_id = c.fetchone()[0]
     conn.close()
     return request_id
 
 def get_bank_request(req_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT * FROM bank_requests WHERE id = ?', (req_id,))
+    c.execute('SELECT * FROM bank_requests WHERE id = %s', (req_id,))
     row = c.fetchone()
     conn.close()
     if row:
@@ -545,7 +546,7 @@ def get_bank_request(req_id):
 def update_bank_request_status(req_id, status):
     conn = get_db()
     c = conn.cursor()
-    c.execute('UPDATE bank_requests SET status = ? WHERE id = ?', (status, req_id))
+    c.execute('UPDATE bank_requests SET status = %s WHERE id = %s', (status, req_id))
     conn.commit()
     conn.close()
     backup_database()
@@ -555,7 +556,7 @@ def log_admin_action(admin_id, action, target_user, amount, description):
     c = conn.cursor()
     c.execute('''
         INSERT INTO admin_logs (admin_id, action, target_user, amount, description)
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s)
     ''', (admin_id, action, target_user, amount, description))
     conn.commit()
     conn.close()
@@ -568,7 +569,7 @@ def get_top_players(limit=10):
         FROM users 
         WHERE total_games > 0
         ORDER BY total_wins DESC, total_games DESC
-        LIMIT ?
+        LIMIT %s
     ''', (limit,))
     players = c.fetchall()
     conn.close()
@@ -754,7 +755,7 @@ async def game_command(update: Update, context: ContextTypes.DEFAULT_TYPE, game_
         
         conn = get_db()
         c = conn.cursor()
-        c.execute('UPDATE challenges SET challenger_name = ?, challenged_name = ? WHERE challenge_id = ?',
+        c.execute('UPDATE challenges SET challenger_name = %s, challenged_name = %s WHERE challenge_id = %s',
                   (challenger_name, challenged_name, challenge_id))
         conn.commit()
         conn.close()
@@ -854,7 +855,7 @@ async def handle_dice_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not game:
             conn = get_db()
             c = conn.cursor()
-            c.execute('SELECT * FROM challenges WHERE (challenger_id = ? OR challenged_id = ?) AND status = "accepted"', (user.id, user.id))
+            c.execute('SELECT * FROM challenges WHERE (challenger_id = %s OR challenged_id = %s) AND status = "accepted"', (user.id, user.id))
             challenge = c.fetchone()
             conn.close()
             
@@ -1543,7 +1544,7 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_wallet(target_user_id, req['amount'] * 100)
             conn = get_db()
             c = conn.cursor()
-            c.execute('UPDATE users SET total_deposited = total_deposited + ? WHERE user_id = ?', (req['amount'] * 100, target_user_id))
+            c.execute('UPDATE users SET total_deposited = total_deposited + %s WHERE user_id = %s', (req['amount'] * 100, target_user_id))
             conn.commit()
             conn.close()
             log_admin_action(user.id, "approve_deposit", target_user_id, req['amount'], f"Approved deposit ₹{req['amount']}")
@@ -1574,7 +1575,7 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             conn = get_db()
             c = conn.cursor()
-            c.execute('UPDATE users SET total_withdrawn = total_withdrawn + ? WHERE user_id = ?', (req['amount'] * 100, target_user_id))
+            c.execute('UPDATE users SET total_withdrawn = total_withdrawn + %s WHERE user_id = %s', (req['amount'] * 100, target_user_id))
             conn.commit()
             conn.close()
             log_admin_action(user.id, "approve_withdraw", target_user_id, req['amount'], f"Approved withdrawal ₹{req['amount']}")
@@ -1634,7 +1635,7 @@ async def handle_user_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT id, amount FROM bank_requests WHERE user_id = ? AND type = 'deposit' AND status = 'pending' AND utr = '' ORDER BY id DESC LIMIT 1", (user.id,))
+    c.execute("SELECT id, amount FROM bank_requests WHERE user_id = %s AND type = 'deposit' AND status = 'pending' AND utr = '' ORDER BY id DESC LIMIT 1", (user.id,))
     row = c.fetchone()
     conn.close()
     
@@ -1649,7 +1650,7 @@ async def handle_user_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         conn = get_db()
         c = conn.cursor()
-        c.execute("UPDATE bank_requests SET utr = ? WHERE id = ?", (utr, req_id))
+        c.execute("UPDATE bank_requests SET utr = %s WHERE id = %s", (utr, req_id))
         conn.commit()
         conn.close()
         
@@ -1677,7 +1678,7 @@ async def handle_user_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT id, amount, utr FROM bank_requests WHERE user_id = ? AND type = 'deposit' AND status = 'pending' ORDER BY id DESC LIMIT 1", (user.id,))
+        c.execute("SELECT id, amount, utr FROM bank_requests WHERE user_id = %s AND type = 'deposit' AND status = 'pending' ORDER BY id DESC LIMIT 1", (user.id,))
         dep_row = c.fetchone()
         conn.close()
         
@@ -1882,7 +1883,7 @@ Example:
                     update_wallet(target_user_id, req['amount'] * 100)
                     conn = get_db()
                     c = conn.cursor()
-                    c.execute('UPDATE users SET total_deposited = total_deposited + ? WHERE user_id = ?', (req['amount'] * 100, target_user_id))
+                    c.execute('UPDATE users SET total_deposited = total_deposited + %s WHERE user_id = %s', (req['amount'] * 100, target_user_id))
                     conn.commit()
                     conn.close()
                     log_admin_action(ADMIN_USER_ID, "approve_deposit", target_user_id, req['amount'], f"Approved deposit ₹{req['amount']}")
@@ -1913,7 +1914,7 @@ Example:
                 else:
                     conn = get_db()
                     c = conn.cursor()
-                    c.execute('UPDATE users SET total_withdrawn = total_withdrawn + ? WHERE user_id = ?', (req['amount'] * 100, target_user_id))
+                    c.execute('UPDATE users SET total_withdrawn = total_withdrawn + %s WHERE user_id = %s', (req['amount'] * 100, target_user_id))
                     conn.commit()
                     conn.close()
                     log_admin_action(ADMIN_USER_ID, "approve_withdraw", target_user_id, req['amount'], f"Approved withdrawal ₹{req['amount']}")
@@ -2046,7 +2047,7 @@ Example:
             currency = data.replace("set_currency_", "")
             conn = get_db()
             c = conn.cursor()
-            c.execute('UPDATE users SET currency = ? WHERE user_id = ?', (currency, user_id))
+            c.execute('UPDATE users SET currency = %s WHERE user_id = %s', (currency, user_id))
             conn.commit()
             conn.close()
             await query.edit_message_text(f"✅ Currency set to {currency}!")
